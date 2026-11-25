@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHANNEL_ID=${CHANNEL_ID}
+      - LLM_API_URL=${LLM_API_URL}
+      - HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-30}
+      - METRICS_CHECK_INTERVAL=${METRICS_CHECK_INTERVAL:-10}
+      - STABILITY_TIMEOUT=${STABILITY_TIMEOUT:-10}
+      - COOLDOWN_PERIOD=${COOLDOWN_PERIOD:-300}
+      - HTTP_TIMEOUT=${HTTP_TIMEOUT:-5}
+      - HTTP_RETRIES=${HTTP_RETRIES:-3}
+      - DRY_RUN=${DRY_RUN:-0}

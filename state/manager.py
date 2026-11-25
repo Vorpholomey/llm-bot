@@ -105,7 +105,7 @@ class StateManager:
                     self._free_stable_timer = None
                     await self._set_busy_state(BusyState.FREE)
         except asyncio.CancelledError:
-            pass  # Таймер был отменён — LLM снова занята
+            self._free_stable_timer = None  # Сброс, чтобы избежать зависания в BUSY
 
     # --- Metrics ---
 

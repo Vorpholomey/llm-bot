@@ -26,7 +26,7 @@ from monitors.metrics import MetricsMonitor
 from commands.router import CommandRouter
 
 # Импортируем обработчики команд
-from commands import status, tokens, model, context, health as health_cmd
+from commands import status, tokens, model, context, health as health_cmd, info
 
 # Настройка логирования
 logging.basicConfig(
@@ -87,6 +87,7 @@ def main() -> None:
     router.register("model", partial(model.handle_model, state=state, sender=sender))
     router.register("context", partial(context.handle_context, state=state, sender=sender))
     router.register("health", partial(health_cmd.handle_health, state=state, sender=sender))
+    router.register("info", partial(info.handle_info, state=state, sender=sender))
 
     # Мониторы
     health_monitor = HealthMonitor(

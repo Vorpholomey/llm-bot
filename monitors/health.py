@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 class HealthMonitor(BaseMonitor):
     """Монитор здоровья LLM — проверяет /health endpoint."""
 
+    # Обновлять модель раз в ~5 минут (при интервале 30с = 10 тиков)
+    _MODEL_REFRESH_INTERVAL = 10
+
     def __init__(
         self,
         http: HTTPClient,
@@ -30,9 +33,44 @@ class HealthMonitor(BaseMonitor):
         self.check_interval = check_interval
         self.cooldown_period = cooldown_period
         self._last_notification_time: float = 0
+        self._tick_count: int = 0
+
+    async def _fetch_model_info(self) -> None:
+        """Запросить /models и обновить информацию о модели в стейте."""
+        try:
+            text = await self.http.get("/models")
+            import json
+            data = json.loads(text)
+        except Exception as e:
+            logger.debug("Не удалось получить /models: %s", e)
+            return
+
+        # Пытаемся извлечь название модели и размер контекста
+        # Поддерживаем несколько форматов ответа llama.cpp API
+        model_name = None
+        context_size = 0
+
+        # Формат 1: {"models": [{"name": "...", ...}]}
+        if isinstance(data, dict) and "models" in data:
+            models = data["models"]
+            if isinstance(models, list) and len(models) > 0:
+                first = models[0]
+                model_name = first.get("name") or first.get("model")
+                context_size = first.get("context_size") or first.get("ctx_len") or 0
+
+        # Формат 2: {"model_name": "...", "ctx_len": ...}
+        if not model_name and isinstance(data, dict):
+            model_name = data.get("model_name") or data.get("name") or data.get("model")
+            context_size = data.get("context_size") or data.get("ctx_len") or data.get("ctx_size") or 0
+
+        if model_name:
+            await self.state.set_model_info(str(model_name), int(context_size))
+            logger.info("Модель обновлена: %s (ctx=%d)", model_name, context_size)
 
     async def tick(self) -> None:
         """Проверить /health и отправить уведомление если состояние изменилось."""
+        self._tick_count += 1
+
         try:
             text = await self.http.get("/health")
             is_ok = "ok" in text.lower()
@@ -61,3 +99,7 @@ class HealthMonitor(BaseMonitor):
             if now - self._last_notification_time >= self.cooldown_period:
                 await self.sender.send("❌ LLM не доступна (отключена)")
                 self._last_notification_time = now
+
+        # Периодически обновляем информацию о модели
+        if self._tick_count % self._MODEL_REFRESH_INTERVAL == 0:
+            await self._fetch_model_info()
