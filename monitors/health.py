@@ -50,12 +50,27 @@ class HealthMonitor(BaseMonitor):
         model_name = None
         context_size = 0
 
+        # Формат llama.cpp API: {"data": [{"id": "...", "meta": {"n_ctx": ...}}]}
+        if isinstance(data, dict) and "data" in data:
+            models_list = data["data"]
+            if isinstance(models_list, list) and len(models_list) > 0:
+                first = models_list[0]
+                # Имя модели в поле "id"
+                model_name = first.get("id") or first.get("name") or first.get("model")
+                # Размер контекста в meta["n_ctx"]
+                meta = first.get("meta")
+                if isinstance(meta, dict):
+                    context_size = meta.get("n_ctx") or meta.get("n_ctx_train") or 0
+                # Фоллбэк на прямые поля
+                if not context_size:
+                    context_size = first.get("context_size") or first.get("ctx_len") or 0
+
         # Формат 1: {"models": [{"name": "...", ...}]}
-        if isinstance(data, dict) and "models" in data:
+        if not model_name and isinstance(data, dict) and "models" in data:
             models = data["models"]
             if isinstance(models, list) and len(models) > 0:
                 first = models[0]
-                model_name = first.get("name") or first.get("model")
+                model_name = first.get("name") or first.get("model") or first.get("id")
                 context_size = first.get("context_size") or first.get("ctx_len") or 0
 
         # Формат 2: {"model_name": "...", "ctx_len": ...}
@@ -100,6 +115,6 @@ class HealthMonitor(BaseMonitor):
                 await self.sender.send("❌ LLM не доступна (отключена)")
                 self._last_notification_time = now
 
-        # Периодически обновляем информацию о модели
-        if self._tick_count % self._MODEL_REFRESH_INTERVAL == 0:
+        # Обновляем информацию о модели при первом запуске и периодически
+        if self._tick_count == 1 or self._tick_count % self._MODEL_REFRESH_INTERVAL == 0:
             await self._fetch_model_info()

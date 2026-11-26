@@ -18,7 +18,15 @@ class TestHealthCheck:
         self, state_manager: StateManager, http_client_mock, sender_mock
     ):
         """Успешный ответ /health → статус OK, сообщение отправлено."""
-        http_client_mock.get.return_value = '{"status": "ok"}'
+        # На первом тике также вызывается /models для загрузки информации о модели
+        async def mock_get(path: str):
+            if path == "/health":
+                return '{"status": "ok"}'
+            elif path == "/models":
+                return '{"data": [{"id": "test-model", "meta": {"n_ctx": 4096}}]}'
+            return "{}"
+
+        http_client_mock.get.side_effect = mock_get
 
         monitor = HealthMonitor(
             http=http_client_mock,
@@ -30,8 +38,10 @@ class TestHealthCheck:
 
         await monitor.tick()
 
-        # Проверка: /health был вызван
-        http_client_mock.get.assert_called_once_with("/health")
+        # Проверка: /health и /models были вызваны (на первом тике модель загружается)
+        assert http_client_mock.get.call_count == 2
+        http_client_mock.get.assert_any_call("/health")
+        http_client_mock.get.assert_any_call("/models")
 
         # Состояние здоровья — OK
         assert await state_manager.is_health_ok() is True
