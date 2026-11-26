@@ -13,14 +13,15 @@ class ChannelSender:
         self.dry_run = dry_run
         self._last_message: Optional[str] = None
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, force: bool = False) -> None:
         """
         Отправить сообщение в канал.
 
         Если текст совпадает с предыдущим — сообщение пропускается (дедупликация).
         В режиме dry_run — только логирование.
+        При force=True — отправить принудительно, игнорируя дедупликацию.
         """
-        if text == self._last_message:
+        if not force and text == self._last_message:
             logger.debug("Дедупликация: сообщение '%s' пропущено", text)
             return
 

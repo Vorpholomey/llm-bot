@@ -46,8 +46,8 @@ class TestHealthCheck:
         # Состояние здоровья — OK
         assert await state_manager.is_health_ok() is True
 
-        # Отправлено сообщение
-        sender_mock.send.assert_called_once_with("✅ LLM доступна")
+        # Отправлено сообщение с force=True
+        sender_mock.send.assert_called_once_with("✅ LLM доступна", force=True)
 
     async def test_failed_health_check_sends_error_message(
         self, state_manager: StateManager, http_client_mock, sender_mock
@@ -71,8 +71,8 @@ class TestHealthCheck:
         # Состояние здоровья — не OK
         assert await state_manager.is_health_ok() is False
 
-        # Отправлено сообщение об ошибке
-        sender_mock.send.assert_called_once_with("❌ LLM не доступна (отключена)")
+        # Отправлено сообщение об ошибке с force=True
+        sender_mock.send.assert_called_once_with("❌ LLM не доступна (отключена)", force=True)
 
     async def test_health_exception_sets_not_ok(
         self, state_manager: StateManager, http_client_mock, sender_mock
@@ -93,7 +93,7 @@ class TestHealthCheck:
         await monitor.tick()
 
         assert await state_manager.is_health_ok() is False
-        sender_mock.send.assert_called_once_with("❌ LLM не доступна (отключена)")
+        sender_mock.send.assert_called_once_with("❌ LLM не доступна (отключена)", force=True)
 
 
 class TestCooldown:
@@ -102,35 +102,7 @@ class TestCooldown:
     async def test_cooldown_prevents_repeat_messages(
         self, state_manager: StateManager, http_client_mock, sender_mock
     ):
-        """Кулдаун предотвращает повторные сообщения о недоступности."""
-        http_client_mock.get.return_value = '{"status": "error"}'
-
-        # Установим health=False (начальное состояние) и установим
-        # _last_notification_time так, чтобы кулдаун сработал
-        monitor = HealthMonitor(
-            http=http_client_mock,
-            state=state_manager,
-            sender=sender_mock,
-            check_interval=30,
-            cooldown_period=60,  # 60 секунд кулдаун
-        )
-
-        # Установим _last_notification_time в текущее время,
-        # чтобы первый тик не отправил сообщение (кулдаун активен)
-        monitor._last_notification_time = time.monotonic()
-
-        # Тик — сообщение не должно отправиться (кулдаун)
-        await monitor.tick()
-        assert sender_mock.send.call_count == 0
-
-        # Ещё один тик — тоже ничего
-        await monitor.tick()
-        assert sender_mock.send.call_count == 0
-
-    async def test_cooldown_expires_allows_new_message(
-        self, state_manager: StateManager, http_client_mock, sender_mock
-    ):
-        """После истечения кулдауна сообщение отправляется снова."""
+        """Повторные сообщения о недоступности НЕ отправляются."""
         http_client_mock.get.return_value = '{"status": "error"}'
 
         monitor = HealthMonitor(
@@ -141,16 +113,112 @@ class TestCooldown:
             cooldown_period=60,
         )
 
-        # Установим _last_notification_time в прошлое (больше кулдауна назад)
-        monitor._last_notification_time = time.monotonic() - 120
+        # Имитируем, что первое уведомление уже было отправлено
+        monitor._notified_unavailable = True
 
-        # Первый тик — кулдаун истёк, сообщение отправлено
+        # Тик — сообщение не должно отправиться
         await monitor.tick()
-        assert sender_mock.send.call_count == 1
+        assert sender_mock.send.call_count == 0
 
-        # Второй тик — в кулдауне, сообщение не отправлено
+        # Ещё один тик — тоже ничего
         await monitor.tick()
-        assert sender_mock.send.call_count == 1
+        assert sender_mock.send.call_count == 0
+
+    async def test_no_repeat_notifications_when_llm_unavailable(
+        self, state_manager: StateManager, http_client_mock, sender_mock
+    ):
+        """Пока LLM недоступна, повторные сообщения НЕ отправляются."""
+        http_client_mock.get.return_value = '{"status": "error"}'
+
+        monitor = HealthMonitor(
+            http=http_client_mock,
+            state=state_manager,
+            sender=sender_mock,
+            check_interval=30,
+            cooldown_period=60,
+        )
+
+        # Имитируем, что первое уведомление уже было отправлено
+        monitor._notified_unavailable = True
+
+        # Несколько тиков — сообщения не должны отправляться
+        await monitor.tick()
+        assert sender_mock.send.call_count == 0
+
+        await monitor.tick()
+        assert sender_mock.send.call_count == 0
+
+        await monitor.tick()
+        assert sender_mock.send.call_count == 0
+
+    async def test_sends_notification_on_startup_when_backend_down(
+        self, state_manager: StateManager, http_client_mock, sender_mock
+    ):
+        """При старте с отключённым бэкэндом — уведомление отправляется."""
+        http_client_mock.get.side_effect = Exception("Connection refused")
+
+        # health_ok по умолчанию False — бэкэнд уже "недоступен"
+        assert await state_manager.is_health_ok() is False
+
+        monitor = HealthMonitor(
+            http=http_client_mock,
+            state=state_manager,
+            sender=sender_mock,
+            check_interval=30,
+            cooldown_period=300,
+        )
+        # _last_notification_time = time.monotonic() - cooldown_period, кулдаун истёк
+
+        await monitor.tick()
+
+        # Уведомление отправлено с force=True
+        sender_mock.send.assert_called_once_with(
+            "❌ LLM не доступна (отключена)", force=True
+        )
+
+    async def test_flapping_respects_cooldown(
+        self, state_manager: StateManager, http_client_mock, sender_mock
+    ):
+        """При мигании (OK→ERROR→OK→ERROR) кулдаун предотвращает спам."""
+        # Сценарий: OK, ERROR, OK, ERROR, OK, ERROR
+        responses = ["ok", "error", "ok", "error", "ok", "error"]
+        call_index = 0
+
+        async def mock_get(path):
+            nonlocal call_index
+            if path == "/health":
+                result = responses[call_index]
+                call_index += 1
+                return f'{{"status": "{result}"}}'
+            return "{}"
+
+        http_client_mock.get.side_effect = mock_get
+
+        monitor = HealthMonitor(
+            http=http_client_mock,
+            state=state_manager,
+            sender=sender_mock,
+            check_interval=30,
+            cooldown_period=300,
+        )
+
+        # 6 тиков
+        for _ in range(6):
+            await monitor.tick()
+
+        # Сообщение об ошибке отправлено только 1 раз (при первом переходе OK→ERROR)
+        # Последующие переходы OK→ERROR пропущены из-за кулдауна
+        error_calls = [
+            c for c in sender_mock.send.call_args_list
+            if "не доступна" in str(c)
+        ]
+        ok_calls = [
+            c for c in sender_mock.send.call_args_list
+            if "доступна" in str(c) and "не" not in str(c)
+        ]
+
+        assert len(error_calls) == 1, f"Ожидается 1 сообщение об ошибке, получено {len(error_calls)}"
+        assert len(ok_calls) == 3, f"Ожидается 3 сообщения 'доступна', получено {len(ok_calls)}"
 
 
 class TestFetchModelInfo:

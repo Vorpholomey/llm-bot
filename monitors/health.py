@@ -32,17 +32,21 @@ class HealthMonitor(BaseMonitor):
         self.sender = sender
         self.check_interval = check_interval
         self.cooldown_period = cooldown_period
-        self._last_notification_time: float = 0
+        # Инициализируем так, чтобы первое уведомление о сбое прошло
+        # (кулдаун считается от момента последнего уведомления)
+        self._last_notification_time: float = time.monotonic() - cooldown_period
         self._tick_count: int = 0
+        # Флаг: было ли отправлено уведомление о недоступности (для первого старта)
+        self._notified_unavailable: bool = False
 
     async def _fetch_model_info(self) -> None:
         """Запросить /models и обновить информацию о модели в стейте."""
         try:
-            text = await self.http.get("/models")
+            raw_text = await self.http.get("/models")
             import json
-            data = json.loads(text)
+            data = json.loads(raw_text)
         except Exception as e:
-            logger.debug("Не удалось получить /models: %s", e)
+            logger.warning("Не удалось получить /models: %s", e)
             return
 
         # Пытаемся извлечь название модели и размер контекста
@@ -60,7 +64,9 @@ class HealthMonitor(BaseMonitor):
                 # Размер контекста в meta["n_ctx"]
                 meta = first.get("meta")
                 if isinstance(meta, dict):
-                    context_size = meta.get("n_ctx") or meta.get("n_ctx_train") or 0
+                    n_ctx_val = meta.get("n_ctx")
+                    n_ctx_train_val = meta.get("n_ctx_train")
+                    context_size = n_ctx_val if n_ctx_val else (n_ctx_train_val if n_ctx_train_val else 0)
                 # Фоллбэк на прямые поля
                 if not context_size:
                     context_size = first.get("context_size") or first.get("ctx_len") or 0
@@ -81,6 +87,8 @@ class HealthMonitor(BaseMonitor):
         if model_name:
             await self.state.set_model_info(str(model_name), int(context_size))
             logger.info("Модель обновлена: %s (ctx=%d)", model_name, context_size)
+        else:
+            logger.warning("Модель не определена — ни один формат не подошёл")
 
     async def tick(self) -> None:
         """Проверить /health и отправить уведомление если состояние изменилось."""
@@ -89,31 +97,36 @@ class HealthMonitor(BaseMonitor):
         try:
             text = await self.http.get("/health")
             is_ok = "ok" in text.lower()
-
         except Exception as e:
             logger.warning("Не удалось проверить /health: %s", e)
             is_ok = False
 
-        # Обновляем состояние
+        # Получаем текущее состояние
         current_health = await self.state.is_health_ok()
+        now = time.monotonic()
+        cooldown_elapsed = now - self._last_notification_time
 
         if is_ok and not current_health:
             # LLM восстановилась
             await self.state.set_health_ok(True)
-            await self.sender.send("✅ LLM доступна")
+            await self.sender.send("✅ LLM доступна", force=True)
+            self._notified_unavailable = False
 
         elif not is_ok and current_health:
-            # LLM только что стала недоступна
-            await self.state.set_health_ok(False)
-            await self.sender.send("❌ LLM не доступна (отключена)")
-            self._last_notification_time = time.monotonic()
-
-        elif not is_ok and not current_health:
-            # LLM по-прежнему недоступна — повторяем с кулдауном
-            now = time.monotonic()
-            if now - self._last_notification_time >= self.cooldown_period:
-                await self.sender.send("❌ LLM не доступна (отключена)")
+            # LLM только что стала недоступна — но проверяем кулдаун
+            if cooldown_elapsed >= self.cooldown_period:
+                await self.state.set_health_ok(False)
+                await self.sender.send("❌ LLM не доступна (отключена)", force=True)
                 self._last_notification_time = now
+                self._notified_unavailable = True
+            else:
+                await self.state.set_health_ok(False)
+
+        elif not is_ok and not current_health and not self._notified_unavailable:
+            # LLM недоступна при старте — отправить первое уведомление
+            await self.state.set_health_ok(False)
+            await self.sender.send("❌ LLM не доступна (отключена)", force=True)
+            self._notified_unavailable = True
 
         # Обновляем информацию о модели при первом запуске и периодически
         if self._tick_count == 1 or self._tick_count % self._MODEL_REFRESH_INTERVAL == 0:
